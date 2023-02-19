@@ -1,0 +1,14 @@
+.Renviron
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+*.Rproj
+.Rproj.user/
+*.rds
+*RDS
+vignettes/*.html
+vignettes/*.pdf
+stan/*
+!stan/*.stan
+out/*

@@ -1,0 +1,457 @@
+#' Gibbs sampler (2-level coverage model)
+#'
+#' This function runs a Gibbs sampler to approximate the posterior predictive
+#' distribution of the unobserved portion of the target population, given the
+#' observed (in Lists 1 and 2) portion of the population.
+#'
+#' The function assumes that, along with the covariates, the data.frame
+#' \code{obs_distribution} includes columns of counts for the four cells, named
+#' \code{Y11}, \code{Y10}, \code{Y01}, and \code{Y00}.
+#'
+#' The cluster effects (random intercepts) in the coverage model are a priori
+#' independent normal variates with a constant variance. In
+#' \code{run_Gibbs_sampler_2levelb}, non-zero means for the prior distribution
+#' of the cluster effects can be spcified by including cluster-level covariates
+#' in the data.frame \code{D_clus}. These cluster effects means are modeled as
+#' linear combinations of the cluster-level covariates, which are specified in
+#' the formulas \code{formula_clus1} and \code{formula_clus2}.
+#'
+#' Note that, when \code{D_clus} is \code{NULL}, the cluster effects means are
+#' assumed to be constant for the coverage models of both lists (i.e. model
+#' formula is \code{~ 1}).
+#'
+#' The overall/common intercept in the first level of the model is supressed,
+#' and instead included in the second level of the model (as part of the cluster
+#' effects means). A 2-level coverage model with an overall intercept at the
+#' first level of the model is implemented in \code{run_Gibbs_sampler_2levela},
+#' which assumes that cluster effects are a priori independent normal variates
+#' with zero mean and constant variance.
+#'
+#' @inheritParams arguments
+#' @param seed An integer specifying the random seed.
+#' @param n_sims An integer specifying the number of simulations (or runs of the
+#'   Gibbs sampler).
+#' @param obs_distribution A data.frame of the unique observed unit records.
+#' @param proposal_cov_coef1,proposal_cov_coef2 Each a covariance matrix for the
+#'   multivariate normal proposal distribution used to draw from the conditional
+#'   posterior distribution of the coefficients in the coverage model for the
+#'   corresponding list (List 1 or 2).
+#' @param prior_mean_coef1,prior_mean_coef2 Each a vector of means for the
+#'   normal prior distribution of the coeffcients of the coverage model for the
+#'   corresponding list.
+#' @param prior_cov_coef1,prior_cov_coef2 Each a covariance matrix for the
+#'   normal prior distribution of the coeffcients of the coverage model for the
+#'   corresponding list.
+#' @param initial_vals A named list with initial values for: the coefficients
+#'   vectors \code{coefficients1} and \code{coefficients2}; the cluster effects
+#'   vectors \code{cluster_effects1} and \code{cluster_effects2}; and the
+#'   cluster effects standard deviations (scalars) \code{clusters_sd1} and
+#'   \code{clusters_sd2}.
+#' @param clusters_col_name A string representing the column name of the
+#'   clusters variable in the data.frame \code{D_obs}.
+#' @param n_clusters An integer specifying the number of unique clusters in the
+#'   population. (Defaults to the number of unique clusters in the observed
+#'   dataset \code{D_obs}.)
+#' @param proposal_scale_coef1,proposal_scale_coef2 Each a numeric scalar
+#'   specifying the scaling factor of the covariance matrix of the M-H proposal
+#'   distribution for the coefficients for the corresponding list.
+#' @param proposal_sd_cluster_effects1,proposal_sd_cluster_effects2 Each a
+#'   numeric value specifying the standard deviation of the M-H proposal
+#'   distribution for the cluster
+#'   effects of the corresponding list.
+#' @param func_n_target_posterior A named list with elements \code{func} and
+#'   \code{args} giving the function used to draw from the posterior distrbution
+#'   of the target size (\code{n_target}) and the arguments to the function.
+#'   (Defaults to the posterior for a Jeffreys prior.)
+#' @param func_sd_posterior1,func_sd_posterior2 Each a named list with elements
+#'   \code{func} and \code{args} giving the function used to draw from the
+#'   posterior distrbution of the standard deviation parameter of the cluster
+#'   effects distribution and the arguments to the function. (Both default to
+#'   the posterior for a uniform prior on [0.01, 3].)
+#' @param formula_clus1,formula_clus2 Each a formula specifying the model for
+#'   the mean of the cluster effects in the corresponding list coverage model;
+#'   defaults to \code{~ 1}.
+#' @param prior_mean_coef_clus1,prior_mean_coef_clus2 The prior means of
+#'   the parameters of the mean of the cluster effects in the corresponding
+#'   coverage model.
+#' @param prior_cov_coef_clus1,prior_cov_coef_clus2 The prior variance or
+#'   covariance matrix of the parameters of the mean of the cluster effects in
+#'   the corresponding coverage model.
+#' @param D_clus A data.frame of cluster-level covariates; defaults to
+#'   \code{NULL}.
+#'
+#' @return A named list of parameter values generated by the Gibbs sampler:
+#'   \itemize{
+#'     \item \code{n_target} A vector of sampled target population sizes;
+#'     \item \code{coefficients1, coefficients2}: Matrices of sampled
+#'       coefficients for the coverage models of lists 1 and 2;
+#'     \item \code{update_coef1, update_coef2}: Each a vector indicating whether
+#'       the coefficients vector for the corresponding list was updated at each
+#'       iteration;
+#'     \item \code{log_like1, log_like2}: Each a vector of log-likelihoods of
+#'       the coverage model coefficients vector for the corresponding list;
+#'     \item \code{cluster_effects1, cluster_effects2}: Matrices of
+#'       sampled cluster effects for lists 1 and 2;
+#'     \item \code{update_clus_eff1, update_clus_eff2}: Each a matrix indicating
+#'       which cluster effects for the corresponding list were updated at each
+#'       iteration (row);
+#'     \item \code{clusters_sd1, clusters_sd2}: Vectors of sampled standard
+#'       deviations for the cluster effects of Lists 1 and 2;
+#'     \item \code{coefficients_clus1, coefficients_clus2}: Matrices of sampled
+#'       cluster-level covariate coefficients for lists 1 and 2.
+#'     \item \code{run_time}: The run-time of the Gibbs sampler.
+#'   }
+#'
+#' @examples
+#' n_obs      <- 100000
+#' n_clusters <- 50
+#' n_sims     <- 10L
+#'
+#' L <- data.frame(L1 = c(1, 1, 0),
+#'                 L2 = c(1, 0, 1))[sample(3, n_obs, replace = TRUE), ]
+#'
+#' D_obs <- data.frame(age     = sample(90, n_obs, replace = TRUE),
+#'                     sex     = sample(c("M", "F"), n_obs, replace = TRUE),
+#'                     Y11     = as.integer(L[[1]] & L[[2]]),
+#'                     Y10     = as.integer(L[[1]] & !L[[2]]),
+#'                     Y01     = as.integer(!L[[1]] & L[[2]]),
+#'                     Y00     = 0L,
+#'                     cluster = c(1:n_clusters,
+#'                                 sample(n_clusters, n_obs - n_clusters, 
+#'                                        replace = TRUE)))
+#'
+#' obs_distribution <- BDSE::distribute(
+#'                       D_obs,
+#'                       contract_cols = c("Y11", "Y10", "Y01", "Y00"))
+#'
+#' D_clus <- data.frame(cluster      = 1:n_clusters,
+#'                      clus_type    = sample(c("Urban", "Rural"),
+#'                                            n_clusters,
+#'                                            replace = TRUE),
+#'                      clus_density = runif(n_clusters))
+#'
+#' ## intercept at level 1 will be dropped in the sampler and included at
+#' ## level 2 as the mean of the prior distribution of the cluster effects:
+#' formula1 <- formula2 <- ~ age + sex  # coefs: age, and sexM (or sexF)
+#'
+#' ## cluster coefs: Intercept, clus_typeUrban (or clus_typeRural), clus_density
+#' formula_clus1 <- ~ clus_type + clus_density
+#' formula_clus2 <- ~ 1
+#'
+#' initial_vals  <- list(coefficients1     = c(0.001, 0.75),
+#'                       coefficients2     = c(0.002, 0.5),
+#'                       cluster_effects1  = rnorm(n_clusters),
+#'                       cluster_effects2  = rnorm(n_clusters),
+#'                       clusters_sd1      = 0.8,
+#'                       clusters_sd2      = 0.75,
+#'                       coefficients_clus1 = c(0.1, 0.2, 0.1),
+#'                       coefficients_clus2 = 0.2)
+#'
+#' n_coef1 <- length(initial_vals[["coefficients1"]])
+#' n_coef2 <- length(initial_vals[["coefficients2"]])
+#'
+#' n_clus_coef1 <- length(initial_vals[["coefficients_clus1"]])
+#' n_clus_coef2 <- length(initial_vals[["coefficients_clus2"]])
+#'
+#' Gibbs_sample <- run_Gibbs_sampler_2levelb(
+#'                   seed                         = 296,
+#'                   n_sims                       = n_sims,
+#'                   obs_distribution             = obs_distribution,
+#'                   D_clus                       = D_clus,
+#'                   formula1                     = formula1,
+#'                   formula2                     = formula2,
+#'                   formula_clus1                = formula_clus1,
+#'                   formula_clus2                = formula_clus2,
+#'                   proposal_cov_coef1           = diag(0.5, nrow = n_coef1),
+#'                   proposal_cov_coef2           = diag(0.5, nrow = n_coef2),
+#'                   proposal_sd_cluster_effects1 = 0.75,
+#'                   proposal_sd_cluster_effects2 = 0.75,
+#'                   prior_mean_coef1             = rep(0, n_coef1),
+#'                   prior_mean_coef2             = rep(0, n_coef2),
+#'                   prior_cov_coef1              = diag(100^2, nrow = n_coef1),
+#'                   prior_cov_coef2              = diag(100^2, nrow = n_coef2),
+#'                   prior_mean_coef_clus1        = rep(0, n_clus_coef1),
+#'                   prior_mean_coef_clus2        = rep(0, n_clus_coef2),
+#'                   prior_cov_coef_clus1         = diag(10^2, nrow = n_clus_coef1),
+#'                   prior_cov_coef_clus2         = 10^2,
+#'                   initial_vals                 = initial_vals,
+#'                   clusters_col_name            = "cluster",
+#'                 # periodic_save                = list(every = n_sims,
+#'                 #                                     where = file.path(getwd(), "out")),
+#'                   print_every                  = 1L)
+#'
+#' str(Gibbs_sample)
+#'
+#' @export
+## TODO: This won't work with our current truncated normal. Try without bounds!
+run_Gibbs_sampler_2levelb <- function(
+                               seed,
+                               n_sims,
+                               obs_distribution,
+                               formula1,
+                               formula2,
+                               proposal_cov_coef1,
+                               proposal_cov_coef2,
+                               proposal_sd_cluster_effects1,
+                               proposal_sd_cluster_effects2,
+                               prior_mean_coef1,
+                               prior_mean_coef2,
+                               prior_cov_coef1,
+                               prior_cov_coef2,
+                               clusters_col_name,
+                               initial_vals = NULL,
+                               restart_from = NULL,
+                               ## params for updating cluster means---------------
+                               formula_clus1 = ~ 1, # or GAM
+                               formula_clus2 = ~ 1,
+                               prior_mean_coef_clus1,  # scalar for ~ 1
+                               prior_mean_coef_clus2,
+                               prior_cov_coef_clus1,  # sd^2 for ~ 1; cov matrix for GAM
+                               prior_cov_coef_clus2,
+                               D_clus = NULL, # cluster-level covariates NULL if ~ 1
+                               ##-------------------------------------------------
+                               cluster_effects_min = -Inf,  # see TODO above
+                               cluster_effects_max = Inf,
+                               n_clusters =
+                                 length(unique(obs_distribution[[clusters_col_name]])),
+                               proposal_scale_coef1 = 1,
+                               proposal_scale_coef2 = 1,
+                               func_n_target_posterior =
+                                 list(func = BDSE:::draw_n_target_jeffreys,
+                                      args = NULL),
+                               func_sd_posterior1 =
+                                 list(func = BDSE:::draw_sd_uniform,
+                                      args = list(prior_lower = 0.01,
+                                                  prior_upper = 3)),
+                               func_sd_posterior2 =
+                                 list(func = BDSE:::draw_sd_uniform,
+                                      args = list(prior_lower = 0.01,
+                                                  prior_upper = 3)),
+                               periodic_save   = NULL,
+                               print_every     = 0L,
+                               record_count    = function(...) FALSE,
+                               return_obs_dist = FALSE) {
+  ## Initialise
+  set.seed(seed)
+  start_time      <- Sys.time()
+  start_date_time <- format(start_time, "%Y%m%d_%H%M%S")  # for file name
+
+  ## Design matrix and cell counts
+  X_obs <- lapply(list(list1 = formula1, 
+                       list2 = formula2),  # drop intercept from level 1
+                  function(f) 
+                    stats::model.matrix(f, data = obs_distribution)[, -1])
+
+  clusters <- obs_distribution[[clusters_col_name]]
+
+  cells    <- obs_distribution[, c("Y11", "Y10", "Y01", "Y00")]
+  
+  n_obs    <- sum(cells[["Y11"]]) + sum(cells[["Y10"]]) + sum(cells[["Y01"]])
+  
+  ## Initialize stored object
+  if (!is.null(restart_from)) {
+    stored  <- lapply(restart_from, add_storage, n = n_sims)
+    start_n <- length(restart_from[["n_target"]]) - 1
+    theta   <- restart_from[["theta"]]
+    p1      <- restart_from[["p1"]]
+    p2      <- restart_from[["p2"]]
+  } else {
+      stored <- BDSE:::initialise_output_storage(
+                  n            = n_sims,
+                  n_clusters   = n_clusters,
+                  q1           = length(initial_vals[["coefficients1"]]),
+                  q2           = length(initial_vals[["coefficients2"]]),
+                  q_clus1      = length(initial_vals[["coefficients_clus1"]]),
+                  q_clus2      = length(initial_vals[["coefficients_clus2"]]),
+                  initial_vals = initial_vals)
+
+      colnames(stored[["coefficients1"]]) <- colnames(X_obs[[1]])
+      colnames(stored[["coefficients2"]]) <- colnames(X_obs[[2]])
+
+      p1 <- BDSE:::invlogit(
+              as.vector(X_obs[[1]] %*% stored[["coefficients1"]][1, ]) + 
+                stored[["cluster_effects1"]][1, ][clusters])
+      p2 <- BDSE:::invlogit(
+              as.vector(X_obs[[2]] %*% stored[["coefficients2"]][1, ]) + 
+                stored[["cluster_effects2"]][1, ][clusters])
+    
+      theta    <- as.vector(gtools::rdirichlet(n = 1, 
+                                               1 / (1 - (1 - p1) * (1 - p2))))
+      start_n  <- 0
+      
+      ## Initialise cluster effects means (we need X_clus if cluster-level covariates
+      ## are used to model the means of cluster effects)
+      if (is.null(D_clus)) {
+          if (any(formula_clus1 != ~1, formula_clus2 != ~1 ))
+            stop("formulas for cluster effects means must be intercept-only (~ 1)",
+                 "when 'D_clus' (the cluster-level covariates data.frame) is NULL.")
+       
+          clusters_mean <- lapply(1:2,
+                             function(j)
+                               stored[[paste0("coefficients_clus", j)]][1, ])
+          
+          colnames(stored[["coefficients_clus1"]]) <- '(Intercept)'
+          colnames(stored[["coefficients_clus2"]]) <- '(Intercept)'
+      } else {
+          X_clus <- lapply(list(formula_clus1, formula_clus2),
+                           function(f) 
+                             stats::model.matrix(f, D_clus))
+
+          colnames(stored[["coefficients_clus1"]]) <- colnames(X_clus[[1]])
+          colnames(stored[["coefficients_clus2"]]) <- colnames(X_clus[[2]])
+
+          clusters_mean <- 
+            lapply(1:2,
+                   function(j) {
+                     b_clus <- stored[[paste0("coefficients_clus", j)]][1, ]
+                     
+                     if (identical(colnames(X_clus[[j]]), "(Intercept)"))
+                       unname(b_clus) else
+                         as.vector(X_clus[[j]] %*% b_clus)
+                   })
+      }
+  }
+
+  ## Gibbs sampler
+  for (i in start_n + 1:n_sims) {
+    ## Draw missing data indices and build missing dataset
+    cells[["Y00"]] <- 
+      BDSE:::draw_missing_counts(
+        n_observed    = n_obs,
+        X_obs1        = X_obs[["list1"]],
+        X_obs2        = X_obs[["list2"]],
+        coefficients1 = stored[["coefficients1"]][i, ],
+        coefficients2 = stored[["coefficients2"]][i, ],
+        offsets1      = stored[["cluster_effects1"]][i, ][clusters],
+        offsets2      = stored[["cluster_effects2"]][i, ][clusters],
+        theta         = theta)
+    
+    stored[["n_target"]][i + 1] <- n_obs + sum(cells[["Y00"]])
+
+    counts <- rowSums(cells)
+    
+    ## Update parameters for each list
+    for (list_id in 1:2) {
+      y <- cells[["Y11"]] + if (list_id == 1) cells[["Y10"]] else cells[["Y01"]]
+
+      ## LEVEL 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ## 1.1) Update individual-level covariate coefficients
+      updated_coefficients <-
+        BDSE:::draw_coefficients(
+          current_coefficients = stored[[paste0("coefficients", list_id)]][i, ],
+          prior_mean           = get(paste0("prior_mean_coef", list_id)),
+          prior_cov            = get(paste0("prior_cov_coef", list_id)),
+          proposal_cov         = get(paste0("proposal_cov_coef", list_id)),
+          proposal_scale       = get(paste0("proposal_scale_coef", list_id)),
+          X                    = X_obs[[list_id]],
+          y                    = y,
+          counts               = counts,
+          offsets              = 
+            stored[[paste0("cluster_effects", list_id)]][i, ][clusters])
+
+      stored[[paste0("coefficients", list_id)]][i + 1, ] <-
+                                        updated_coefficients[["coefficients"]]
+      stored[[paste0("log_like", list_id)]][i + 1] <-
+                                        updated_coefficients[["log_likelihood"]]
+      stored[[paste0("update_coef", list_id)]][i + 1]    <-
+                                        updated_coefficients[["was_updated"]]
+
+      ## 1.2) Update cluster effects
+      updated_cluster_effects <- 
+        BDSE:::draw_cluster_effects(
+          current_cluster_effects = stored[[paste0("cluster_effects", list_id)]][i, ],
+          prior_mean              = clusters_mean[[list_id]],  # updated in 2.2 below
+          prior_sd                = stored[[paste0("clusters_sd", list_id)]][i],
+          proposal_sd             = get(paste0("proposal_sd_cluster_effects", list_id)),
+          X                       = X_obs[[list_id]],
+          y                       = y,
+          coefficients            = stored[[paste0("coefficients", list_id)]][i + 1, ],
+          clusters                = clusters,
+          n_clusters              = n_clusters,
+          min                     = cluster_effects_min, 
+          max                     = cluster_effects_max,
+          counts                  = counts
+        )
+
+      stored[[paste0("cluster_effects", list_id)]][i + 1, ] <-
+                                  updated_cluster_effects[["cluster_effects"]]
+      stored[[paste0("update_clus_eff", list_id)]][i + 1, ]  <-
+                                  updated_cluster_effects[["was_updated"]]
+
+      ## LEVEL 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ## 2.1) Update standard deviation for cluster effects
+      sd_posterior <- get(paste0("func_sd_posterior", list_id))  # func & args
+      residuals    <- stored[[paste0("cluster_effects", list_id)]][i + 1, ] -
+                        clusters_mean[[list_id]]
+      
+      updated_sd   <- BDSE:::do_call(sd_posterior[["func"]],
+                                     args = c(list(residuals = residuals), 
+                                              sd_posterior[["args"]]))
+      
+      stored[[paste0("clusters_sd", list_id)]][i + 1] <- updated_sd
+
+      ## 2.2) Update means for cluster effects
+      if (get(paste0("formula_clus", list_id)) != ~1) {
+        updated_coefficients_clus <-
+          BDSE:::draw_coefficients_lm(
+            X          = X_clus[[list_id]],
+            y          = stored[[paste0("cluster_effects", list_id)]][i + 1, ],
+            prior_mean = get(paste0("prior_mean_coef_clus", list_id)),
+            prior_cov  = get(paste0("prior_cov_coef_clus", list_id)),
+            normal_sd  = stored[[paste0("clusters_sd", list_id)]][i + 1])[1, ]
+
+         stored[[paste0("clusters_mean", list_id)]][i + 1, ] <-
+           clusters_mean[[list_id]] <-
+             as.vector(X_clus[[list_id]] %*% updated_coefficients_clus)
+      } else {
+          updated_coefficients_clus <-
+            BDSE:::draw_mean_normal(
+              y          = stored[[paste0("cluster_effects", list_id)]][i + 1, ],
+              normal_sd  = stored[[paste0("clusters_sd", list_id)]][i + 1],
+              prior_mean = get(paste0("prior_mean_coef_clus", list_id)),
+              prior_sd   = sqrt(get(paste0("prior_cov_coef_clus", list_id))))
+
+          stored[[paste0("clusters_mean", list_id)]][i + 1] <- 
+            clusters_mean[[list_id]] <- updated_coefficients_clus
+      }
+
+      stored[[paste0("coefficients_clus", list_id)]][i + 1, ] <-
+        updated_coefficients_clus
+    }
+
+    ## Update theta (target covariate distribution)
+    theta <- as.vector(gtools::rdirichlet(1, counts))
+    
+    ## Save subpopulation counts
+    if (record_count(i)) {
+      if (is.null(stored[["out_counts"]])) 
+        stored[["out_counts"]] <- obs_distribution[, return_obs_dist]
+      stored[["out_counts"]][[paste0("counts_", i)]] <- counts
+    }
+    
+    ## Periodically save results to .RDS file (overwrites previous save)
+    if (!is.null(periodic_save)) {
+      if (!i %% periodic_save[["every"]]) {
+        file_name <- make_file_path(path = periodic_save[["where"]],
+                                    model = "L2b", 
+                                    date_time = start_date_time,
+                                    seed = seed)
+
+        result <- tryCatch(saveRDS(stored, file = file_name),
+                           error = function(e) e)
+      }
+    }
+    
+    ## Print progress
+    if (print_every > 0L & !i %% print_every)
+      print(paste("Iteration", i, "completed"))
+  }
+  
+  ## Here to allow restarts
+  stored[["theta"]] <- theta
+
+  ## For bookkeeping
+  stored[["run_time"]] <- Sys.time() - start_time
+  
+  stored
+}

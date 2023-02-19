@@ -1,0 +1,6 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^scripts*
+^R_dev/*
+^stan*
+^out/*
